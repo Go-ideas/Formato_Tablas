@@ -130,6 +130,10 @@ def normalize_sheet_names(wb) -> None:
             ws.title = "BANNER 1"
 
 
+def is_banner_sheet(name: str) -> bool:
+    return "BANNER" in name.strip().upper()
+
+
 def clear_existing_merges(ws) -> None:
     for merged_range in list(ws.merged_cells.ranges):
         ws.unmerge_cells(str(merged_range))
@@ -621,7 +625,7 @@ def format_workbook(
     wb = load_workbook(input_path)
     normalize_sheet_names(wb)
 
-    banner_sheets = [ws for ws in wb.worksheets if ws.title.strip().upper().startswith('BANNER')]
+    banner_sheets = [ws for ws in wb.worksheets if is_banner_sheet(ws.title)]
     emit(0.05, f'Archivo cargado. Hojas objetivo: {len(banner_sheets)}')
 
     if not banner_sheets:
