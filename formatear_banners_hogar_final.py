@@ -134,6 +134,27 @@ def is_banner_sheet(name: str) -> bool:
     return "BANNER" in name.strip().upper()
 
 
+def sheet_has_data(ws) -> bool:
+    """Indica si la hoja tiene al menos una celda con valor."""
+    for row in ws.iter_rows(min_row=1, max_row=ws.max_row, min_col=1, max_col=ws.max_column, values_only=True):
+        for value in row:
+            if not is_blank(value):
+                return True
+    return False
+
+
+def get_target_sheets(wb) -> List:
+    """
+    Prioriza hojas BANNER (comportamiento historico).
+    Si no existen, procesa cualquier hoja visible con datos.
+    """
+    banner_sheets = [ws for ws in wb.worksheets if ws.sheet_state == "visible" and is_banner_sheet(ws.title)]
+    if banner_sheets:
+        return banner_sheets
+
+    return [ws for ws in wb.worksheets if ws.sheet_state == "visible" and sheet_has_data(ws)]
+
+
 def clear_existing_merges(ws) -> None:
     for merged_range in list(ws.merged_cells.ranges):
         ws.unmerge_cells(str(merged_range))
@@ -529,6 +550,82 @@ def style_data_inside_blocks(ws, infos: List[dict], max_col: int) -> None:
             label_cell.font = FONT_BASE
 
 
+def find_used_bounds(ws) -> Optional[Tuple[int, int, int, int]]:
+    """
+    Encuentra limites reales de celdas con contenido:
+    (min_row, min_col, max_row, max_col).
+    """
+    min_row: Optional[int] = None
+    min_col: Optional[int] = None
+    max_row = 0
+    max_col = 0
+
+    for row_idx, values in enumerate(
+        ws.iter_rows(min_row=1, max_row=ws.max_row, min_col=1, max_col=ws.max_column, values_only=True),
+        start=1,
+    ):
+        row_has_data = False
+        for col_idx, value in enumerate(values, start=1):
+            if is_blank(value):
+                continue
+            row_has_data = True
+            if min_col is None or col_idx < min_col:
+                min_col = col_idx
+            if col_idx > max_col:
+                max_col = col_idx
+
+        if row_has_data:
+            if min_row is None:
+                min_row = row_idx
+            max_row = row_idx
+
+    if min_row is None or min_col is None:
+        return None
+    return (min_row, min_col, max_row, max_col)
+
+
+def style_generic_used_range(ws) -> bool:
+    """
+    Fallback para archivos que no tienen estructura de banner:
+    aplica cuadricula y borde exterior al rango usado completo.
+    """
+    bounds = find_used_bounds(ws)
+    if bounds is None:
+        return False
+
+    start_row, start_col, end_row, end_col = bounds
+    if start_row == end_row and start_col == end_col:
+        cell = ws.cell(start_row, start_col)
+        cell.font = FONT_BOLD
+        cell.alignment = ALIGN_LEFT
+        return True
+
+    apply_table_grid(
+        ws,
+        start_row=start_row,
+        end_row=end_row,
+        start_col=start_col,
+        end_col=end_col,
+        group_starts=[start_col],
+        group_ends=[end_col],
+    )
+    apply_outer_border(ws, start_row, end_row, start_col, end_col)
+
+    # Primera fila como encabezado.
+    for col in range(start_col, end_col + 1):
+        header = ws.cell(start_row, col)
+        header.font = FONT_BOLD
+        header.alignment = ALIGN_CENTER
+
+    # Si la primera columna contiene texto, mantenerla alineada a la izquierda.
+    for row in range(start_row + 1, end_row + 1):
+        first = ws.cell(row, start_col)
+        if isinstance(first.value, str):
+            first.alignment = ALIGN_LEFT
+
+    return True
+
+
 # =========================================================
 # Formateo completo
 # =========================================================
@@ -582,7 +679,11 @@ def format_sheet(
     # Apply data grid block by block to report useful progress.
     total_blocks = len(infos)
     if total_blocks == 0:
-        emit(data_end, 'No se detectaron bloques para formatear')
+        applied_generic = style_generic_used_range(ws)
+        if applied_generic:
+            emit(data_end, 'Sin bloques BANNER: se aplico formato generico al rango usado')
+        else:
+            emit(data_end, 'No se detectaron celdas con datos para formatear')
     else:
         for idx, info in enumerate(infos, start=1):
             style_data_inside_blocks(ws, [info], max_col)
@@ -625,11 +726,11 @@ def format_workbook(
     wb = load_workbook(input_path)
     normalize_sheet_names(wb)
 
-    banner_sheets = [ws for ws in wb.worksheets if is_banner_sheet(ws.title)]
-    emit(0.05, f'Archivo cargado. Hojas objetivo: {len(banner_sheets)}')
+    target_sheets = get_target_sheets(wb)
+    emit(0.05, f'Archivo cargado. Hojas objetivo: {len(target_sheets)}')
 
-    if not banner_sheets:
-        emit(0.90, 'No se encontraron hojas BANNER. Guardando salida')
+    if not target_sheets:
+        emit(0.90, 'No se encontraron hojas con datos para procesar. Guardando salida')
         wb.save(output_path)
         emit(1.00, 'Proceso completado')
         print(f'Archivo generado: {output_path}')
@@ -639,17 +740,17 @@ def format_workbook(
     process_end = 0.95
     process_span = process_end - process_start
 
-    for index, ws in enumerate(banner_sheets, start=1):
+    for index, ws in enumerate(target_sheets, start=1):
         print(f'Formateando hoja: {ws.title}')
 
-        sheet_start = process_start + process_span * ((index - 1) / len(banner_sheets))
-        sheet_end = process_start + process_span * (index / len(banner_sheets))
+        sheet_start = process_start + process_span * ((index - 1) / len(target_sheets))
+        sheet_end = process_start + process_span * (index / len(target_sheets))
         sheet_span = sheet_end - sheet_start
 
         def on_sheet_progress(sheet_progress: float, step_message: str) -> None:
             emit(
                 sheet_start + (sheet_span * sheet_progress),
-                f'Hoja {index}/{len(banner_sheets)} ({ws.title}): {step_message}',
+                f'Hoja {index}/{len(target_sheets)} ({ws.title}): {step_message}',
             )
 
         format_sheet(ws, progress_callback=on_sheet_progress)
